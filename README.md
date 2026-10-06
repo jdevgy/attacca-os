@@ -12,8 +12,8 @@ Python packages to install. Login protection is optional.
 **1. Start Attacca**
 
 ```bash
-git clone https://github.com/jdevgy/attacca-ai.git
-cd attacca-ai
+git clone https://github.com/jdevgy/attacca-os.git
+cd attacca-os
 python3 attacca.py serve --host 127.0.0.1 --port 4173
 ```
 
@@ -24,7 +24,7 @@ locally or through an SSH tunnel. Your choice persists across restarts.
 
 **2. Install the coding-tool plugin**
 
-In a second terminal, from the cloned `attacca-ai` directory:
+In a second terminal, from the cloned `attacca-os` directory:
 
 ```bash
 python3 install.py --url http://127.0.0.1:4173
@@ -32,6 +32,8 @@ python3 install.py --url http://127.0.0.1:4173
 
 This installs **the code in your local clone**, with no `curl` or plugin
 download, and configures the coding tools it finds. It is safe to rerun.
+For GitHub-backed native installs instead, follow
+[Install directly from GitHub marketplaces](#install-directly-from-github-marketplaces).
 
 Alternatively, install from a running server (useful for Docker or a remote
 server; run this on the machine where your coding tool runs):
@@ -117,6 +119,62 @@ to sync those writes before retiring it.
 Use `127.0.0.1` when client and server run in the same machine/container. From
 elsewhere, use stable DNS or the Docker host's published port — not a container's
 changing private IP.
+
+## Install directly from GitHub marketplaces
+
+The public repository is a marketplace for both Codex and Claude Code. You
+still need a running Attacca server; installing a plugin does not start one.
+
+**Prepare the runtime once on the machine running your coding tool.** From
+your `attacca-os` clone:
+
+```bash
+python3 install.py --runtime-only --url http://127.0.0.1:4173
+```
+
+If you have not cloned it yet:
+
+```bash
+git clone https://github.com/jdevgy/attacca-os.git
+cd attacca-os
+python3 install.py --runtime-only --url http://127.0.0.1:4173
+```
+
+Replace the URL for a remote server. This installs the stable support files
+needed by lifecycle hooks and monitors, without registering or replacing any
+coding-tool plugin. It does not start or restart the server. Keep this step:
+native marketplace installation alone does not create the stable runtime.
+
+**Codex — run in your terminal:**
+
+```bash
+codex plugin marketplace add jdevgy/attacca-os
+codex plugin add attacca@attacca-local
+```
+
+**Claude Code — run in your terminal:**
+
+```bash
+claude plugin marketplace add jdevgy/attacca-os
+claude plugin install attacca@agentg
+```
+
+Or, inside Claude Code, use `/plugin marketplace add jdevgy/attacca-os`
+followed by `/plugin install attacca@agentg`.
+
+The catalog IDs are `attacca-local` for Codex and `agentg` for Claude; they
+are retained for compatibility with existing installations. The plugin is
+named **Attacca** in both. Start a new client session in your own project,
+then run `$attacca:setup` in Codex or `/attacca:setup` in Claude.
+
+Already installed through the universal installer? Run the same runtime
+preparation and marketplace-add command. Codex uses the same `plugin add`
+command; in Claude, use `claude plugin update attacca@agentg` instead of
+`plugin install`. You do not need to remove a marketplace or uninstall the
+plugin to switch its source to GitHub.
+
+These commands add the repository's catalog to your client. They do not
+submit Attacca to a vendor's curated public directory.
 
 ## Advanced reference
 
@@ -317,8 +375,9 @@ new source, and restart with the same database and options. Running servers
 retain their original distribution snapshot until restarted. Updating installed
 clients is separate: rerun either installer with the intended source or server.
 
-Prefer a native in-tool install? The same zip carries Claude, Kimi, and Codex
-plugin manifests:
+For direct GitHub-backed Codex and Claude installs, see the
+[marketplace commands](#install-directly-from-github-marketplaces) above.
+The server-distributed zip also carries Claude, Kimi, and Codex manifests:
 
 - **Claude Code:** after the one-liner adds the local marketplace, run
   `/plugin install attacca@<marketplace name>` if needed

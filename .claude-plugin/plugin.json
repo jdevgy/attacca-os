@@ -3,7 +3,9 @@
   "displayName": "Attacca — Project Continuity Layer",
   "version": "0.5.14",
   "description": "Shared project memory for AI coding tools: event ledger, task claims, decisions, human+AI room, and cold-start handoffs across Claude Code, Kimi Code, Codex, GLM, Cline and any MCP client.",
-  "author": { "name": "agentg" },
+  "author": { "name": "Attacca" },
+  "homepage": "https://github.com/jdevgy/attacca-os",
+  "repository": "https://github.com/jdevgy/attacca-os",
   "commands": "./commands/",
   "mcpServers": "./plugin-mcp.json"
 }

@@ -42,12 +42,22 @@ def server_origin(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Install this local Attacca checkout into detected coding tools (no curl or download).")
-    parser.add_argument("--url", default="http://127.0.0.1:4173",
-                        help="Attacca server origin (default: %(default)s)")
+    parser.add_argument("--url", default=None,
+                        help="Attacca server origin (default: http://127.0.0.1:4173; "
+                             "--runtime-only preserves an existing machine origin)")
+    parser.add_argument("--runtime-only", action="store_true",
+                        help="install the stable runtime and CLI for native marketplaces, "
+                             "without registering coding tools or restarting the watcher")
     args = parser.parse_args(argv)
     try:
-        base_url = server_origin(args.url)
-    except ValueError as error:
+        if args.runtime_only:
+            # Validate before replacing runtime bytes. The shell re-reads the
+            # config under its normal lock before the single origin update.
+            attacca._read_machine_config()
+        base_url = server_origin(args.url if args.url is not None else
+                                 (attacca.configured_server_url()
+                                  if args.runtime_only else "http://127.0.0.1:4173"))
+    except (ValueError, attacca.AttaccaError) as error:
         parser.error(str(error))
     shell = shutil.which("sh")
     if not shell:
@@ -69,6 +79,11 @@ def main(argv=None):
             payload.write_bytes(archive)
             env = os.environ.copy()
             env["ATTACCA_INSTALL_ARCHIVE"] = str(payload)
+            # This mode is an explicit command-line choice, never inherited
+            # accidentally by a later ordinary installation.
+            env.pop("ATTACCA_INSTALL_RUNTIME_ONLY", None)
+            if args.runtime_only:
+                env["ATTACCA_INSTALL_RUNTIME_ONLY"] = "1"
             print("Installing local Attacca %s; clients will connect to %s" %
                   (snapshot["version"], base_url), flush=True)
             result = subprocess.run([shell], input=script, text=True,

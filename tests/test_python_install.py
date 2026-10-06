@@ -80,6 +80,47 @@ class PythonInstallerUnitTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 2)
             snapshot.assert_not_called()
 
+    def test_runtime_only_mode_is_explicit_not_inherited(self):
+        observed = []
+
+        def run(command, **kwargs):
+            observed.append(kwargs["env"])
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.dict(os.environ, {"ATTACCA_INSTALL_RUNTIME_ONLY": "1"}), \
+                mock.patch.object(attacca, "_read_machine_config"), \
+                mock.patch.object(local_install.shutil, "which", return_value="/test/sh"), \
+                mock.patch.object(local_install.subprocess, "run", side_effect=run):
+            self.assertEqual(local_install.main([
+                "--runtime-only", "--url", "http://127.0.0.1:9"]), 0)
+            self.assertEqual(local_install.main(["--url", "http://127.0.0.1:9"]), 0)
+        self.assertEqual(observed[0]["ATTACCA_INSTALL_RUNTIME_ONLY"], "1")
+        self.assertNotIn("ATTACCA_INSTALL_RUNTIME_ONLY", observed[1])
+
+    def test_runtime_only_preflights_invalid_machine_config(self):
+        with mock.patch.object(attacca, "_read_machine_config",
+                               side_effect=attacca.AttaccaError("invalid machine config")), \
+                mock.patch.object(attacca, "_capture_distribution_snapshot") as snapshot, \
+                mock.patch("sys.stderr", new_callable=io.StringIO):
+            with self.assertRaises(SystemExit) as error:
+                local_install.main(["--runtime-only", "--url", "http://127.0.0.1:9"])
+            self.assertEqual(error.exception.code, 2)
+            snapshot.assert_not_called()
+
+    def test_normal_default_origin_remains_4173_without_machine_or_env_lookup(self):
+        def run(command, **kwargs):
+            self.assertIn('BASE="http://127.0.0.1:4173"', kwargs["input"])
+            return subprocess.CompletedProcess(command, 0)
+
+        with mock.patch.dict(os.environ, {"ATTACCA_URL": "https://ignored.example.invalid"}), \
+                mock.patch.object(attacca, "_read_machine_config") as machine, \
+                mock.patch.object(attacca, "configured_server_url") as configured, \
+                mock.patch.object(local_install.shutil, "which", return_value="/test/sh"), \
+                mock.patch.object(local_install.subprocess, "run", side_effect=run):
+            self.assertEqual(local_install.main([]), 0)
+        machine.assert_not_called()
+        configured.assert_not_called()
+
     def test_readme_keeps_short_start_and_separate_advanced_reference(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         quick = readme.split("## Quick start (local server)", 1)[1].split(
@@ -123,12 +164,15 @@ class PythonInstallerIntegrationTests(unittest.TestCase):
             "TASK_TEST_COMMAND_LOG": str(self.root / "commands.txt"),
         })
 
-    def run_install(self):
+    def run_install(self, extra_args=None, url="http://127.0.0.1:9"):
         # No server listens here. No curl/wget/native client from the real
         # machine is on PATH; all configuration belongs to this test's home.
+        command = [sys.executable, "-B", str(ROOT / "install.py")]
+        if url is not None:
+            command.extend(["--url", url])
+        command.extend(extra_args or [])
         result = subprocess.run(
-            [sys.executable, "-B", str(ROOT / "install.py"),
-             "--url", "http://127.0.0.1:9"],
+            command,
             cwd=str(ROOT), env=self.env, capture_output=True, text=True,
             timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -171,6 +215,109 @@ class PythonInstallerIntegrationTests(unittest.TestCase):
         self.assertIn("codex mcp get attacca", commands)
         self.assertIn("kimi code: native plugin installed/updated", result.stdout)
         self.assertTrue((self.home / ".codex/config.toml").is_file())
+
+    def test_runtime_only_twice_preserves_clients_identities_and_private_state(self):
+        sentinels = (
+            ".codex/config.toml", ".codex/attacca-client.json",
+            ".codex/plugins/cache/attacca-local/attacca/old/plugin.json",
+            ".claude/settings.json", ".claude/attacca-client.json",
+            ".claude/plugins/installed_plugins.json",
+            ".kimi-code/plugins/installed.json", ".kimi-code/mcp.json",
+            ".cursor/mcp.json", ".attacca/credentials.json",
+            ".attacca/identity.json", ".attacca/client-instance.json",
+            ".attacca/watcher/watcher-state.json",
+            ".attacca/watcher/offline/scope/outboxes/device/records/one.json",
+            ".attacca/watcher/wake/session/receipt.json", ".attacca/attacca.db",
+        )
+        before = {}
+        for relative in sentinels:
+            path = self.home / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(("Keep these bytes: " + relative + "\n").encode())
+            before[path] = (path.read_bytes(), path.stat().st_mtime_ns)
+        machine_path = self.home / ".attacca/config.json"
+        machine = {
+            "version": 1, "server_url": "https://old.example.invalid",
+            "actor_bindings": {"saved": {"actor_id": "example.director.codex.newton"}},
+            "other_setting": {"keep": True},
+        }
+        machine_path.write_text(json.dumps(machine))
+        for client in ("claude", "codex", "kimi"):
+            path = self.bin / client
+            path.write_text('#!/bin/sh\nprintf "%s\\n" "' + client +
+                            ' $*" >> "$TASK_TEST_COMMAND_LOG"\nexit 0\n')
+            path.chmod(0o755)
+        # Prove the branch itself skips watcher startup, not a test-only
+        # environment switch. All other client code is isolated in this HOME.
+        self.env.pop("ATTACCA_DISABLE_WATCHER")
+        self.env.pop("ATTACCA_DISABLE_SESSION_WAKE")
+        result = self.run_install(["--runtime-only"])
+        machine_after = json.loads(machine_path.read_text())
+        self.assertEqual(machine_after["server_url"], "http://127.0.0.1:9")
+        self.assertEqual(machine_after["actor_bindings"], machine["actor_bindings"])
+        self.assertEqual(machine_after["other_setting"], machine["other_setting"])
+        self.assertEqual(machine_path.stat().st_mode & 0o777, 0o600)
+        machine_bytes = machine_path.read_bytes()
+        machine_mtime = machine_path.stat().st_mtime_ns
+        self.run_install(["--runtime-only"])
+        self.assertEqual(machine_path.read_bytes(), machine_bytes)
+        self.assertEqual(machine_path.stat().st_mtime_ns, machine_mtime)
+        for path, (data, modified) in before.items():
+            self.assertEqual(path.read_bytes(), data, str(path))
+            self.assertEqual(path.stat().st_mtime_ns, modified, str(path))
+        self.assertFalse((self.root / "commands.txt").exists())
+        self.assertNotIn("attacca watcher:", result.stdout)
+        self.assertIn("runtime-only", result.stdout)
+        self.assertTrue((self.home / ".attacca/plugin/attacca/hooks/session_start.py").is_file())
+        self.assertTrue((self.home / ".attacca/plugin-data/rollback/attacca/attacca.py").is_file())
+        self.assertFalse((self.home / ".attacca/attacca.db-wal").exists())
+
+    def test_runtime_only_creates_no_database_or_client_registration(self):
+        self.run_install(["--runtime-only"])
+        for relative in (".attacca/attacca.db", ".attacca/credentials.json",
+                         ".attacca/watcher", ".codex", ".claude", ".kimi-code"):
+            self.assertFalse((self.home / relative).exists(), relative)
+        machine = json.loads((self.home / ".attacca/config.json").read_text())
+        self.assertEqual(machine["server_url"], "http://127.0.0.1:9")
+        # The GitHub-cache runtime retains a localhost packaged/environment
+        # default. The one machine origin must still win without editing it.
+        env = dict(self.env, ATTACCA_URL="http://127.0.0.1:4173")
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "attacca.py"), "--json", "server", "show"],
+            cwd=str(self.root), env=env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status = json.loads(result.stdout)
+        self.assertEqual(status["server_url"], "http://127.0.0.1:9")
+        self.assertEqual(status["source"], "machine")
+
+    def test_runtime_only_without_url_preserves_existing_machine_origin(self):
+        path = self.home / ".attacca/config.json"
+        path.parent.mkdir()
+        original = b'{"version":1,"server_url":"https://saved.example.invalid","actor_bindings":{}}\n'
+        path.write_bytes(original)
+        modified = path.stat().st_mtime_ns
+        result = self.run_install(["--runtime-only"], url=None)
+        self.assertIn("https://saved.example.invalid", result.stdout)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.stat().st_mtime_ns, modified)
+
+    def test_runtime_only_rejects_unsafe_machine_config_before_install(self):
+        path = self.home / ".attacca/config.json"
+        path.parent.mkdir()
+        target = self.root / "do-not-change.json"
+        target.write_text('{"server_url":"https://saved.example.invalid"}')
+        path.symlink_to(target)
+        result = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "install.py"), "--runtime-only"],
+            cwd=str(self.root), env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("safe regular file", result.stderr)
+        self.assertFalse((self.home / ".attacca/plugin").exists())
+        self.assertEqual(target.read_text(), '{"server_url":"https://saved.example.invalid"}')
+
+    def test_inherited_runtime_only_environment_does_not_skip_normal_install(self):
+        self.env["ATTACCA_INSTALL_RUNTIME_ONLY"] = "1"
+        self.test_same_installer_drives_native_clients()
 
 
 if __name__ == "__main__":

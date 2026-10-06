@@ -25,7 +25,7 @@ python3 attacca.py --version
 **Please do not open a public GitHub issue for a security problem.**
 
 Use **GitHub private vulnerability reporting** on the repository —
-<https://github.com/jdevgy/attacca-ai> → **Security** tab → **Report a
+<https://github.com/jdevgy/attacca-os> → **Security** tab → **Report a
 vulnerability**. This keeps the report private until a fix is published.
 
 Useful things to include: the Attacca version (`python3 attacca.py --version`),

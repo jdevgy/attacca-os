@@ -1,10 +1,12 @@
 {
   "name": "attacca",
-  "version": "0.5.14+codex.20260927091940",
+  "version": "0.5.14+codex.20261006020937",
   "description": "Shared project memory and workspace continuity across AI coding tools.",
   "author": {
-    "name": "agentg"
+    "name": "Attacca"
   },
+  "homepage": "https://github.com/jdevgy/attacca-os",
+  "repository": "https://github.com/jdevgy/attacca-os",
   "skills": "./skills/",
   "mcpServers": {
     "attacca": {
@@ -24,7 +26,8 @@
     "displayName": "Attacca",
     "shortDescription": "Shared project memory across coding agents",
     "longDescription": "Connect Codex to an Attacca workspace, then share handoffs, tasks, decisions, room messages, and history with other coding tools.",
-    "developerName": "agentg",
+    "developerName": "Attacca",
+    "websiteURL": "https://github.com/jdevgy/attacca-os",
     "category": "Developer Tools",
     "capabilities": [
       "Interactive",

@@ -13,7 +13,12 @@ Git tags in this repository, so versions are dated by their bump commit.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- A runtime-only source installer for GitHub marketplace users. It prepares
+  stable hook and monitor files without changing coding-tool registrations.
+- Verified direct GitHub marketplace installation commands for Codex and
+  Claude Code, with separate one-time runtime preparation.
 
 ## [0.5.14] - 2026-09-27
 

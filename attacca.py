@@ -15107,6 +15107,34 @@ echo "attacca downloaded to $DEST (wired to $BASE)"
 echo "command installed: $HOME/.local/bin/attacca"
 echo ""
 
+# Native GitHub marketplaces own their registrations and caches. Materialize
+# only the stable hook/CLI runtime, then record the machine origin so their
+# unmodified manifests resolve a remote server as well as localhost. Preserve
+# all identity bindings and URL-scoped credentials/outboxes; do not run the
+# general server-switch routine, tool configuration, or watcher restart here.
+if [ "${{ATTACCA_INSTALL_RUNTIME_ONLY:-0}}" = "1" ]; then
+  python3 - "$DEST" "$BASE" <<'PYEOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+import attacca
+server_url = attacca._normalize_hosted_server_url(sys.argv[2])
+path = attacca.machine_config_path()
+lock_path = path.with_name(".%s.lock" % path.name)
+with attacca._MACHINE_CONFIG_THREAD_LOCK, attacca._exclusive_config_lock(lock_path):
+    machine, _ = attacca._read_machine_config()
+    if machine.get("server_url") != server_url:
+        machine.setdefault("version", attacca.MACHINE_CONFIG_SCHEMA_VERSION)
+        machine["server_url"] = server_url
+        machine["updated_at"] = attacca.now_iso()
+        attacca._atomic_switch_write(
+            path, attacca._json_switch_bytes(machine), mode=0o600)
+print("attacca runtime: machine server origin saved: %s" % server_url)
+PYEOF
+  echo "attacca runtime-only: native marketplaces and client configurations left unchanged."
+  echo "  Watcher restart is deferred to the next Attacca session hook."
+  exit 0
+fi
+
 # The stable plugin directory was just atomically replaced. A detached Python
 # watcher keeps its previously imported code in memory, so explicitly ensure
 # the new launch fingerprint now. This does not depend on curl's cwd: the hook
