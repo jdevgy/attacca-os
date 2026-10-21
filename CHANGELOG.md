@@ -13,6 +13,17 @@ Git tags in this repository, so versions are dated by their bump commit.
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep optional-authentication setup credential-free across discovery and
+  final verification, including legacy servers; retain supplied-key access
+  checks and protected-server authorization.
+- Publish checkout wiring only after hosted setup verification, report
+  partial progress, and resume interrupted applies without allocating another
+  permanent identity. Ambiguous allocation outcomes stop for verification.
+- Include live access policy in setup discovery and clarify that hosted
+  status database paths are server-side, not evidence of a local fallback.
+
 ### Added
 
 - A runtime-only source installer for GitHub marketplace users. It prepares

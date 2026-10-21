@@ -97,6 +97,10 @@ returned exact registered identity for MCP verification.
 
 Handle the server's access choice before account authorization:
 
+Discovery returns the live policy in `access`, the separate
+`credential_required` flag, and `source.kind=hosted`. A successful discovery is
+not proof that apply or identity registration has completed.
+
 - `server_setup_required` or `setup_required=true`: open the displayed console
   URL and ask the human to choose **Local use without login** or **Protect with
   login**. First-run setup must be completed from the server's localhost browser
@@ -111,6 +115,12 @@ Handle the server's access choice before account authorization:
   continue workspace, role, and exact AI identity setup. Keep `authenticated=false`:
   this mode does not establish an authenticated human. Do not rename an existing
   actor or change its role because login is optional.
+- Legacy servers may report `access_mode=legacy` with
+  `authentication_required=false` and `effective_authentication=optional`.
+  This also permits credential-free setup; the word `legacy` does not require
+  browser approval. Do not start pairing just to wire MCP after an optional
+  setup. A selected key still retains its membership, ownership, and scope
+  checks; optional authentication does not make a rejected key valid.
 - A rejected credential or 401/403 is not evidence of local access. Never
   purge credentials, bypass rejection by retrying anonymously, or disable login
   protection to recover. Use the authorization flow below only when an
@@ -336,6 +346,16 @@ display that hidden value. `temporary` appears only in a current-proxy
 `agent_register` call for an already-bound client. Do not use `-i`, because this
 guided flow already obtained typed choices.
 
+If apply reports `setup_partial_progress`, a workspace or identity may already
+exist. Use the reported progress and retry the same confirmed command after
+fixing the stated failure; the packaged recovery journal reuses its recorded
+identity. Do not test recovery by issuing another new-identity request, delete
+the project link, or claim that an error means nothing was created. An older
+installation without a recovery record requires live inspection before any
+allocation. `setup_outcome_unknown` means the server may have accepted a request
+whose response was lost: stop allocation and verify the exact outcome first.
+Never invent ownership or grant membership to recover an older partial setup.
+
 Setup must configure all detected coding tools, MCP, managed instructions, and
 the lifecycle startup hook. Inspect its result for server URL,
 `.attacca/project.json`, tool/MCP wiring, and the hook. State that
@@ -351,6 +371,12 @@ identity, lead, and relationship choices may also have advanced project context.
 If the current MCP host cannot hot-reload the new connection, report the exact
 unverified checks and let its native reconnect mechanism run; never infer
 success from configuration files and never make restart the default recovery.
+
+The `db` path in hosted status names the server's database, not a local client
+fallback. Cached results explicitly carry `offline=true` and
+`read_source=verified_local_mirror`. A database path alone proves neither
+offline use nor a verified live connection; inspect transport/source metadata
+and keep a failed or unverified connection labelled as such.
 
 ### Verify automatic delivery separately from MCP
 

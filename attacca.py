@@ -2219,6 +2219,7 @@ DEVICE_ENROLLMENT_INTERVAL_SECONDS = 5
 AUTH_MODES = ("auto", "compatibility")
 AUTH_ARTIFACT_FILES = (
     "attacca.py",
+    "setup_progress.py",
     "install.py",
     "local_access.py",
     "terminal_flow.py",
@@ -14759,6 +14760,7 @@ def save_project_export_artifact(path, data, force=False):
 # install payload.
 PLUGIN_FILES = [
     "attacca.py",
+    "setup_progress.py",
     "install.py",
     "local_access.py",
     "codex_hook_compat.py",
@@ -22623,7 +22625,11 @@ def remote_json(url, method, path, body=None, actor=None, actor_type=None,
             detail = json.loads(raw).get("error")
         except Exception:
             detail = raw.decode("utf-8", "replace") or str(err)
-        raise AttaccaError("server rejected setup: %s" % detail)
+        error_type = (AuthenticationError if err.code == 401 else
+                      AuthorizationError if err.code == 403 else AttaccaError)
+        failure = error_type("server rejected setup: %s" % detail)
+        failure.http_status = err.code
+        raise failure from err
     except Exception as err:
         raise AttaccaError(
             "cannot reach Attacca server at %s: %s" % (url, err))
@@ -22720,6 +22726,29 @@ def _resume_provisional_setup_terminal(url, terminal_flow, device_id,
         "provisional_human": True,
         "credentials_file": str(CREDENTIALS_FILE),
     }
+
+
+def _setup_auth_optional(access):
+    """One policy predicate for discovery, apply and final verification.
+
+    Legacy servers advertise optional authentication without the newer
+    ``anonymous_access`` field. Do not invent a client-side login requirement
+    for them, or infer optional access from a missing/ambiguous response.
+    Supplied credentials still undergo normal scope and revocation checks.
+    """
+    return (isinstance(access, dict) and
+            access.get("authentication_required") is False and
+            not access.get("setup_required") and
+            not access.get("bootstrap_required") and
+            access.get("access_mode") not in ("pending", "protected"))
+
+
+def _setup_access_summary(access):
+    """Public policy only: never expose principal, cookie or key material."""
+    return {key: access[key] for key in (
+        "access_mode", "authentication_required", "effective_authentication",
+        "anonymous_access", "setup_required", "bootstrap_required",
+        "authenticated", "version") if key in access}
 
 
 def _ensure_client_setup_auth(url, actor_id, interactive=False,
@@ -22854,16 +22883,14 @@ def _ensure_client_setup_auth(url, actor_id, interactive=False,
         raise AuthenticationError(
             "client_authorization_scope_required: the received client key "
             "could not verify this installation and linked workspace")
-    if anonymous.get("access_mode") == "local" and anonymous.get("anonymous_access"):
+    if _setup_auth_optional(anonymous) and not paste_token:
         # Verify with normal credential loading: a supplied rejected key must
         # not silently become an anonymous session in local mode.
         remote_json(server_url, "GET", "/v1/auth/status", actor=actor_id,
                     actor_type="agent", project_id=project_id)
-        return {"required": False, "authenticated": False, "kind": "local",
-                "client_instance": client_instance, "hot_reload": True}
-    if not anonymous.get("authentication_required") and not (
-            interactive or paste_token):
         return {"required": False, "authenticated": False,
+                "kind": anonymous.get("access_mode") or "optional",
+                "access": _setup_access_summary(anonymous),
                 "client_instance": client_instance, "hot_reload": True}
     try:
         result = flow.authorize_client(
@@ -23056,11 +23083,11 @@ def close_remote_setup_session(url=None):
 
 
 def provision_setup_agent_token(url, project_id, actor_id):
-    """Ensure this exact registered actor is on the machine terminal token.
+    """Verify final setup access, never initiate authorization after writes.
 
-    The historical name remains for setup callers. No actor token is created;
-    an existing terminal credential is extended atomically or a browser
-    enrollment is started for the selected project/actor binding.
+    The historical name remains for callers. Client credentials are not
+    actor-bound; required authorization belongs in the preflight, while an
+    optional server only needs the exact registered actor verified here.
     """
     project_id = str(project_id or "").strip()
     actor_id = str(actor_id or "").strip()
@@ -23072,8 +23099,7 @@ def provision_setup_agent_token(url, project_id, actor_id):
     client_instance = load_client_instance_id(runtime)
     access = remote_json(configured_server_url(url), "GET", "/v1/auth/status",
                          actor=actor_id, actor_type="agent", project_id=project_id)
-    if access.get("access_mode") == "local" and access.get("anonymous_access") \
-            and not access.get("authentication_required"):
+    if _setup_auth_optional(access):
         checked = remote_json(configured_server_url(url), "GET",
             "/v1/projects/%s/agents?q=%s" % (
                 urllib.parse.quote(project_id, safe=""),
@@ -23081,11 +23107,15 @@ def provision_setup_agent_token(url, project_id, actor_id):
             actor=actor_id, actor_type="agent", project_id=project_id)
         if not any(item.get("agent_id") == actor_id
                    for item in (checked.get("agents") or [])):
-            raise AuthorizationError("local setup requires an exact registered agent")
-        return {"created": False, "credential_kind": "local", "status": "ready",
+            raise AuthorizationError("setup requires an exact registered agent")
+        return {"created": False,
+                "credential_kind": ("client" if access.get("authenticated")
+                                    else access.get("access_mode") or "optional"),
+                "status": "ready",
                 "actor_id": actor_id, "project_id": project_id, "runtime": runtime,
                 "client_instance": client_instance, "credential_saved": False,
-                "authentication_required": False, "authenticated": False,
+                "authentication_required": False,
+                "authenticated": bool(access.get("authenticated")),
                 "hot_reload": True}
     active = _remote_setup_session(url) or {}
     if active.get("kind") == "token" \
@@ -23122,21 +23152,21 @@ def provision_setup_agent_token(url, project_id, actor_id):
         runtime=runtime, project_id=project_id,
         credentials_path=CREDENTIALS_FILE)
     if not status.get("authorized"):
-        try:
-            status = flow.authorize_client(
-                configured_server_url(url), client_instance=client_instance,
-                runtime=runtime, project_id=project_id, actor_id=actor_id,
-                device_id=load_device_id(),
-                credentials_path=CREDENTIALS_FILE,
-                open_browser=True, prompt=True)
-        except flow.TerminalFlowError as error:
-            raise AuthenticationError(
-                "client_authorization_required: open %s" %
-                flow.fallback_login_url(configured_server_url(url))) from error
-    if not status.get("authorized"):
         raise AuthenticationError(
-            "client_authorization_required: open %s" %
-            status.get("authorization_url"))
+            "setup_authorization_changed: this server now requires a valid "
+            "installation credential; setup did not start another browser "
+            "approval after creating the workspace or identity. Re-run the "
+            "same setup choices to verify authorization before continuing")
+    # Local credential metadata alone is not authority: verify live access to
+    # the exact registered actor, including membership and selected-key scope.
+    checked = remote_json(
+        configured_server_url(url), "GET", "/v1/projects/%s/agents?q=%s" % (
+            urllib.parse.quote(project_id, safe=""),
+            urllib.parse.quote(actor_id, safe="")),
+        actor=actor_id, actor_type="agent", project_id=project_id)
+    if not any(item.get("agent_id") == actor_id
+               for item in (checked.get("agents") or [])):
+        raise AuthorizationError("setup requires an exact registered agent")
     return {
         "created": False,
         "credential_kind": "client",
@@ -24484,6 +24514,8 @@ def discover_remote_setup(url=None, path=None, here=False,
                           selected_project_id=None, home=None):
     """Read-only first-run discovery for conversational setup."""
     url = configured_server_url(url)
+    access = remote_json(url, "GET", "/v1/auth/status",
+                         actor=actor_id, actor_type=actor_type)
     cwd = Path(path or os.getcwd()).resolve()
     inherited_link = None if here else find_project_link(cwd)
     local_root = Path(inherited_link["root_path"]) if inherited_link \
@@ -24584,6 +24616,9 @@ def discover_remote_setup(url=None, path=None, here=False,
             for selected_role in AGENT_ROLES
         }
     return {"server_url": url,
+            "access": _setup_access_summary(access),
+            "credential_required": not _setup_auth_optional(access),
+            "source": {"kind": "hosted", "server_url": url},
             "git": {"detected": bool(repository["remote"]),
                     "remote": repository["remote"]},
             "folder": {"name": folder_name, "path": str(local_root)},
@@ -24622,7 +24657,7 @@ def apply_remote_network_setup(url, project_id, actor_id, actor_type,
                                relationship=None, principal_side="other",
                                identity_mode="auto", identity_actor=None,
                                make_default=None,
-                               client_instance=None, home=None):
+                               client_instance=None, home=None, progress=None):
     """Apply the explicitly confirmed governance part of guided setup.
 
     The function is deliberately idempotent. Re-running full setup registers
@@ -24697,6 +24732,12 @@ def apply_remote_network_setup(url, project_id, actor_id, actor_type,
             "reuse" if binding else (
             "new" if role != "keep" else "auto")
         )
+    if progress and progress.actor_id:
+        # Resume the confirmed operation, not a fresh request for another
+        # unique persona. The checkpoint never substitutes for hosted access.
+        selected_mode = progress.record.get("identity_mode") or selected_mode
+        make_default = progress.record.get("make_default", make_default)
+        identity_actor = progress.actor_id
     if role == "keep" and binding:
         effective_actor = binding["actor_id"]
         if selected_mode == "repair":
@@ -24838,10 +24879,43 @@ def apply_remote_network_setup(url, project_id, actor_id, actor_type,
                 "session_only_identity_requires_current_mcp: shell setup "
                 "cannot switch the already-running parent coding client; "
                 "use native setup or explicitly choose make_default")
-        registered = remote_json(
-            url, "POST", "/v1/projects/%s/agents" % encoded,
-            registration_body,
-            actor=registration_actor, actor_type=actor_type)
+        if progress and progress.actor_id:
+            resumed = remote_json(
+                url, "GET", "/v1/projects/%s/agents?q=%s" % (
+                    encoded, urllib.parse.quote(progress.actor_id, safe="")),
+                actor=progress.actor_id, actor_type=actor_type,
+                project_id=project_id)
+            registered = next((item for item in resumed.get("agents", [])
+                               if item.get("agent_id") == progress.actor_id), None)
+            parts = parse_canonical_agent_id(progress.actor_id, project_id)
+            if not registered or not parts or parts["role"] != role \
+                    or parts["runtime"] != runtime \
+                    or registered.get("role") != role \
+                    or normalize_agent_runtime(
+                        registered.get("runtime"), registered.get("agent_id")) != runtime:
+                raise AuthorizationError(
+                    "setup_recovery_identity_changed: saved identity is no "
+                    "longer registered with the confirmed workspace role")
+            registered = dict(registered, already_registered=True)
+            actions.append({"kind": "identity_recovered",
+                            "actor_id": progress.actor_id})
+        else:
+            allocating = bool(progress and selected_mode in ("new", "repair"))
+            if allocating:
+                progress.before_mutation("identity_register")
+            try:
+                registered = remote_json(
+                    url, "POST", "/v1/projects/%s/agents" % encoded,
+                    registration_body,
+                    actor=registration_actor, actor_type=actor_type)
+            except (AuthenticationError, AuthorizationError):
+                if allocating:
+                    progress.mutation_rejected("identity_register")
+                raise
+            if progress:
+                progress.identity_registered(
+                    registered.get("agent_id") or effective_actor,
+                    identity_mode=selected_mode, make_default=persist_default)
         effective_actor = registered.get("agent_id") or effective_actor
         actions.append({"kind": "identity", "role": role,
                         "mode": selected_mode,
@@ -24951,7 +25025,8 @@ def one_shot_remote_setup(actor_id, actor_type, db_path, url=None,
                           write_instructions=True, path=None, here=False,
                           manage_server=True, manage_tools=True,
                           skip_tools=None, home=None, attach_project=None,
-                          create_project=None):
+                          create_project=None, defer_checkout=False,
+                          progress=None):
     """Configure this checkout against the project database on *url*.
 
     This is the hosted/plugin path. It never registers the checkout in the
@@ -24973,12 +25048,20 @@ def one_shot_remote_setup(actor_id, actor_type, db_path, url=None,
     if manage_server:
         server.update(ensure_server_running(url, db_path))
 
-    response = remote_json(url, "GET", "/v1/projects",
+    response = remote_json(url, "GET", "/v1/projects?options=1",
                            actor=actor_id, actor_type=actor_type)
     projects = response.get("projects") or []
     by_id = {p["project_id"]: p for p in projects}
     selected = attach_project or (
         inherited_link["project_id"] if inherited_link else None)
+    recovering = bool(progress and progress.project_id)
+    if recovering:
+        selected = progress.project_id
+        if selected not in by_id:
+            raise AuthorizationError(
+                "setup_recovery_access_required: recorded workspace '%s' is "
+                "not accessible with this installation's current authority; "
+                "no new workspace or identity was created" % selected)
     matched_by = "explicit" if attach_project else (
         "project_link" if inherited_link else None)
     if selected and selected not in by_id:
@@ -25030,13 +25113,16 @@ def one_shot_remote_setup(actor_id, actor_type, db_path, url=None,
         raise AttaccaError(
             "no Attacca workspaces exist yet; create the first one with "
             "`setup --create NAME` or use the Attacca setup picker")
-    if create_project and git_matches:
+    if create_project and git_matches and not recovering:
         raise AttaccaError(
             "this Git remote already belongs to workspace '%s'; attach it "
             "instead of creating a duplicate"
             % git_matches[0]["project_id"])
 
-    if selected:
+    if recovering:
+        created = False
+        matched_by = "setup_recovery"
+    elif selected:
         # Also seeds old projects with their Git identity so the next clone
         # can auto-match even before project.json is committed.
         project = remote_json(
@@ -25051,15 +25137,24 @@ def one_shot_remote_setup(actor_id, actor_type, db_path, url=None,
                 % (project.get("project_id"), selected))
         created = False
     else:
-        project = remote_json(
-            url, "POST", "/v1/projects",
-            {"name": create_project,
-             "repository_fingerprint": repository_fingerprint},
-            actor=actor_id, actor_type=actor_type)
+        if progress:
+            progress.before_mutation("project_create")
+        try:
+            project = remote_json(
+                url, "POST", "/v1/projects",
+                {"name": create_project,
+                 "repository_fingerprint": repository_fingerprint},
+                actor=actor_id, actor_type=actor_type)
+        except (AuthenticationError, AuthorizationError):
+            if progress:
+                progress.mutation_rejected("project_create")
+            raise
         selected = project["project_id"]
         created = not project.get("already_existed", False)
         matched_by = "created" if created else (
             project.get("matched_by") or "existing")
+    if progress and not recovering:
+        progress.project_created(selected)
 
     # Fetch the authoritative hosted Cloud Context before touching instruction
     # files.  Hosted setup must never populate a checkout from the unrelated
@@ -25079,16 +25174,33 @@ def one_shot_remote_setup(actor_id, actor_type, db_path, url=None,
                 "'%s'; no checkout instruction files were written" % selected)
         hosted_cloud_context = _validated_cloud_context_payload(
             hosted_cloud_context)
-    files = _configure_checkout(
-        selected, local_root, db_path, url, False, write_instructions,
-        manage_tools, skip_tools, home,
+    configuration = dict(
+        project_id=selected, root_path=local_root, db_path=db_path, url=url,
+        write_instructions=write_instructions, manage_tools=manage_tools,
+        skip_tools=skip_tools, home=home,
         cloud_context_payload=hosted_cloud_context
         if write_instructions else _CLOUD_CONTEXT_UNSET)
-    return {"project_id": selected, "root_path": str(local_root),
+    info = {"project_id": selected, "root_path": str(local_root),
             "project_created": created, "matched_by": matched_by,
             "mode": "server", "tools_only": False,
             "cwd_inside_root": str(cwd) != str(local_root), "url": url,
-            "server": server, **files}
+            "server": server}
+    if defer_checkout:
+        info["_pending_checkout"] = configuration
+    else:
+        info.update(_finish_remote_checkout(configuration))
+    return info
+
+
+def _finish_remote_checkout(configuration):
+    """Publish local wiring only after hosted identity and access verify."""
+    values = dict(configuration)
+    project_id = values.pop("project_id")
+    root_path = values.pop("root_path")
+    db_path = values.pop("db_path")
+    url = values.pop("url")
+    return _configure_checkout(project_id, root_path, db_path, url, False,
+                               **values)
 
 
 def setup_details_text(project_id, db_path, url=DEFAULT_URL, tools=None):
@@ -27175,7 +27287,82 @@ def human_print(result, command=None):
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def _setup_progress_scope(args, url, actor):
+    """Use the same checkout boundary for inspection and locked apply."""
+    cwd = Path(os.getcwd()).resolve()
+    link = None if args.here or args.attach or args.create \
+        else find_project_link(cwd)
+    root = Path(link["root_path"]) if link else (
+        cwd if args.here else git_worktree_root(cwd))
+    runtime = normalize_agent_runtime(actor=actor)
+    return {"url": url, "root_path": root, "runtime": runtime,
+            "client_instance": load_client_instance_id(runtime)}
+
+
+def _resume_interactive_setup_choices(args, url, actor, actor_type, ask):
+    """Offer an interrupted apply before discovery changes create to attach."""
+    if args.attach or args.create:
+        return False
+    import setup_progress
+    pending = setup_progress.inspect_pending(
+        **_setup_progress_scope(args, url, actor))
+    if not pending or not (pending.get("project_id") or pending.get("in_flight")):
+        return False
+    request = pending.get("request")
+    if not request:
+        raise AttaccaError(
+            "setup_resume_choices_required: an interrupted setup exists for "
+            "'%s'; retry its original confirmed command. This older recovery "
+            "record does not contain interactive choices" %
+            (pending.get("project_id") or "an unconfirmed workspace"))
+    if request.get("actor_id") != actor or request.get("actor_type") != actor_type:
+        raise AttaccaError(
+            "setup_resume_actor_changed: resume using the original setup "
+            "actor; saved choices never replace the current actor")
+    answer = ask("resume interrupted setup for '%s'? [Y/n]: " % (
+        pending.get("project_id") or request.get("create_project") or
+        "unconfirmed workspace")).lower()
+    if answer not in ("", "y", "yes"):
+        raise AttaccaError(
+            "setup_resume_declined: no new setup was started; inspect the "
+            "existing partial setup before choosing a different operation")
+    for key in ("role", "lead", "identity_mode", "identity_actor",
+                "make_default", "bridge", "relationship", "here"):
+        setattr(args, key, request[key])
+    args.attach = request["attach_project"]
+    args.create = request["create_project"]
+    args.principal = request["principal_side"]
+    args.no_instructions = not request["write_instructions"]
+    args.skip_tools = ",".join(request["skip_tools"])
+    return True
+
+
 def cli_main(argv=None):
+    """Release setup locks on every exit and report committed partial work."""
+    recovery = {}
+    with contextlib.ExitStack() as stack:
+        try:
+            return _cli_main(argv, setup_stack=stack, recovery=recovery)
+        except Exception as error:
+            progress = recovery.get("progress")
+            if progress and (progress.project_id or
+                             progress.record.get("in_flight")):
+                message = (
+                    "setup_partial_progress: project=%s actor=%s state=%s; "
+                    "hosted changes were not rolled back. Recovery record: %s. "
+                    "Retry the same confirmed setup choices, not a different "
+                    "new-identity request. Cause: %s" % (
+                        progress.project_id or "unconfirmed",
+                        progress.actor_id or "unconfirmed", progress.state,
+                        progress.path, error))
+                kind = type(error) if isinstance(error, AttaccaError) else AttaccaError
+                raise kind(message) from error
+            if error.__class__.__name__ == "SetupProgressError":
+                raise AttaccaError(str(error)) from error
+            raise
+
+
+def _cli_main(argv=None, setup_stack=None, recovery=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -27570,6 +27757,7 @@ def cli_main(argv=None):
     elif cmd == "setup":
         setup_url = configured_server_url(args.url)
         setup_auth = None
+        setup_progress = None
         if args.discover:
             setup_auth = ensure_remote_setup_auth(
                 setup_url, actor, interactive=False,
@@ -27653,6 +27841,8 @@ def cli_main(argv=None):
             setup_auth = ensure_remote_setup_auth(
                 setup_url, actor, interactive=True, ask=ask,
                 login_username=args.login, paste_token=args.paste_token)
+            resuming_choices = _resume_interactive_setup_choices(
+                args, setup_url, actor, actor_type, ask)
             discovery = discover_remote_setup(
                 setup_url, actor_id=actor, actor_type=actor_type,
                 here=args.here)
@@ -27662,7 +27852,9 @@ def cli_main(argv=None):
                 for workspace in discovery["workspaces"]}
             print("  Git repository: %s" % (
                 git["remote"] if git["detected"] else "not detected"))
-            if discovery["linked_project_id"]:
+            if resuming_choices:
+                print("  resuming the previously confirmed workspace and tool choices")
+            elif discovery["linked_project_id"]:
                 print("  already linked: %s" % workspace_names.get(
                     discovery["linked_project_id"],
                     discovery["linked_project_id"]))
@@ -27677,7 +27869,8 @@ def cli_main(argv=None):
                     % (subject, suggestion_name)).lower()
                 if confirmed in ("", "y", "yes"):
                     args.attach = suggestion
-            if not discovery["linked_project_id"] and not args.attach:
+            if not resuming_choices and not discovery["linked_project_id"] \
+                    and not args.attach:
                 workspaces = discovery["workspaces"]
                 if workspaces:
                     print("  available workspaces:")
@@ -27704,10 +27897,11 @@ def cli_main(argv=None):
                         or suggestion
             if args.create is not None and not args.create.strip():
                 raise AttaccaError("new workspace name cannot be blank")
-            skip_in = ask("tools to SKIP (codex,cline,cursor,windsurf,kimi,gemini,"
-                          "vscode,opencode; blank = wire all detected): ")
-            if skip_in:
-                args.skip_tools = skip_in
+            if not resuming_choices:
+                skip_in = ask("tools to SKIP (codex,cline,cursor,windsurf,kimi,gemini,"
+                              "vscode,opencode; blank = wire all detected): ")
+                if skip_in:
+                    args.skip_tools = skip_in
         if not load_owner() and os.environ.get(ENV_OWNER) is None:
             default_owner = os.environ.get("USER") or "user"
             save_owner(default_owner)
@@ -27734,13 +27928,41 @@ def cli_main(argv=None):
                     setup_url, actor, interactive=False,
                     login_username=args.login,
                     paste_token=args.paste_token)
+            # The journal is private recovery metadata, never a credential.
+            # Establish authority first; only then record the confirmed apply.
+            import setup_progress as setup_progress_module
+            setup_progress = setup_stack.enter_context(
+                setup_progress_module.operation(
+                    **_setup_progress_scope(args, setup_url, actor),
+                    request={
+                        "attach_project": args.attach, "create_project": args.create,
+                        "role": args.role, "lead": args.lead,
+                        "identity_mode": args.identity_mode,
+                        "identity_actor": args.identity_actor,
+                        "make_default": args.make_default,
+                        "bridge": args.bridge, "relationship": args.relationship,
+                        "principal_side": args.principal, "here": args.here,
+                        "write_instructions": not args.no_instructions,
+                        "skip_tools": sorted(skip) if skip else [],
+                        "actor_id": actor, "actor_type": actor_type,
+                    }))
+            recovery["progress"] = setup_progress
             info = one_shot_remote_setup(
                 actor, actor_type, db_path, url=setup_url, here=args.here,
                 manage_server=not args.no_server, skip_tools=skip,
                 write_instructions=not args.no_instructions,
-                attach_project=args.attach, create_project=args.create)
+                attach_project=args.attach, create_project=args.create,
+                defer_checkout=True, progress=setup_progress)
         network_result = None
         if info["mode"] == "server":
+            saved_choices = setup_progress.record.get("network_requested")
+            if args.interactive and saved_choices:
+                # These exact choices were already confirmed before an
+                # interrupted apply. Do not default to a fresh persona picker.
+                for key, value in saved_choices.items():
+                    setattr(args, key, value)
+                args.interactive = False
+                print("Resuming the previously confirmed role and identity choices.")
             if args.interactive:
                 network_discovery = discover_remote_setup(
                     setup_url, actor_id=actor, actor_type=actor_type,
@@ -27970,6 +28192,13 @@ def cli_main(argv=None):
             if actor_type == "agent" or args.role != "keep" \
                     or args.lead != "keep" \
                     or args.relationship is not None:
+                setup_progress.network_requested({
+                    "role": args.role, "lead": args.lead,
+                    "identity_mode": args.identity_mode,
+                    "identity_actor": args.identity_actor,
+                    "make_default": args.make_default, "bridge": args.bridge,
+                    "relationship": args.relationship, "principal": args.principal,
+                })
                 network_result = apply_remote_network_setup(
                     setup_url, info["project_id"], actor, actor_type,
                     role=args.role, lead=args.lead, bridge=args.bridge,
@@ -27977,7 +28206,7 @@ def cli_main(argv=None):
                     principal_side=args.principal,
                     identity_mode=args.identity_mode,
                     identity_actor=args.identity_actor,
-                    make_default=args.make_default)
+                    make_default=args.make_default, progress=setup_progress)
         credential_result = None
         if info["mode"] == "server" and actor_type == "agent":
             token_actor = (network_result or {}).get("actor") or actor
@@ -27985,6 +28214,10 @@ def cli_main(argv=None):
                 setup_url, info["project_id"], token_actor)
         elif _remote_setup_session(setup_url):
             close_remote_setup_session(setup_url)
+        if "_pending_checkout" in info:
+            info.update(_finish_remote_checkout(info.pop("_pending_checkout")))
+        if setup_progress:
+            setup_progress.complete()
         watcher_result = None
         watcher_error = None
         if info["mode"] == "server":

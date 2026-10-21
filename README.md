@@ -277,6 +277,10 @@ are marked offline/stale; allowlisted writes are fsynced to a device outbox and
 replayed idempotently after reconnect. Missing, ambiguous, forged, or role-
 changed mirrors fail closed.
 
+The `db` field in hosted status is the database path **on the server**. It does
+not mean the client opened that path locally. Offline responses explicitly
+include `offline: true` and `read_source: verified_local_mirror`.
+
 `attacca.py mcp` is a separate, explicitly selected serverless/direct-database
 mode for local development (`setup --stdio`). It is not the installed plugins'
 automatic hosted fallback, and neither a local database nor the administrative
@@ -407,6 +411,17 @@ That is the portable workspace link and is safe to commit so another clone
 selects the same workspace. A checkout `.mcp.json`, when needed by a client
 without the native plugin, contains a machine/site-specific server endpoint;
 regenerate it on each machine rather than using it as workspace identity.
+When the server reports authentication as optional, setup does not require a
+browser approval just to wire MCP. Supplied credentials still retain their
+access restrictions. Discovery includes the live access policy and source.
+Checkout wiring is published after hosted identity and access verification.
+An interrupted setup records private progress under `~/.attacca/setup-progress`;
+retry the same confirmed command to resume its allocated identity. Interactive
+setup offers to resume the saved choices before showing a new workspace picker. If an
+allocation's response was lost, setup stops for verification rather than
+creating a second identity. Recovery never changes server access policy or
+grants membership, and older failures without a journal require inspection.
+
 The same guided run then configures every detected tool, verifies MCP and the
 lifecycle hooks, asks this AI's workspace role (first-run default: Director +
 Lead Director), and confirms its installation identity. A new installation
