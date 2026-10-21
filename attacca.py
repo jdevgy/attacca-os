@@ -23129,7 +23129,8 @@ def provision_setup_agent_token(url, project_id, actor_id):
         encoded = urllib.parse.quote(project_id, safe="")
         checked = remote_json(
             configured_server_url(url), "GET",
-            "/v1/projects/%s/agents" % encoded,
+            "/v1/projects/%s/agents?q=%s" % (
+                encoded, urllib.parse.quote(actor_id, safe="")),
             actor=actor_id, actor_type="agent",
             bearer_token=active.get("bearer_token"),
             project_id=project_id)
@@ -27334,7 +27335,7 @@ def _resume_interactive_setup_choices(args, url, actor, actor_type, ask):
     args.principal = request["principal_side"]
     args.no_instructions = not request["write_instructions"]
     args.skip_tools = ",".join(request["skip_tools"])
-    return True
+    return pending["operation_id"]
 
 
 def cli_main(argv=None):
@@ -27758,6 +27759,7 @@ def _cli_main(argv=None, setup_stack=None, recovery=None):
         setup_url = configured_server_url(args.url)
         setup_auth = None
         setup_progress = None
+        resume_operation_id = None
         if args.discover:
             setup_auth = ensure_remote_setup_auth(
                 setup_url, actor, interactive=False,
@@ -27843,6 +27845,7 @@ def _cli_main(argv=None, setup_stack=None, recovery=None):
                 login_username=args.login, paste_token=args.paste_token)
             resuming_choices = _resume_interactive_setup_choices(
                 args, setup_url, actor, actor_type, ask)
+            resume_operation_id = resuming_choices or None
             discovery = discover_remote_setup(
                 setup_url, actor_id=actor, actor_type=actor_type,
                 here=args.here)
@@ -27934,6 +27937,7 @@ def _cli_main(argv=None, setup_stack=None, recovery=None):
             setup_progress = setup_stack.enter_context(
                 setup_progress_module.operation(
                     **_setup_progress_scope(args, setup_url, actor),
+                    expected_operation_id=resume_operation_id,
                     request={
                         "attach_project": args.attach, "create_project": args.create,
                         "role": args.role, "lead": args.lead,

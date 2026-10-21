@@ -422,13 +422,17 @@ def _operation_lock(path):
 
 
 @contextmanager
-def operation(*, url, root_path, runtime, client_instance, request, storage_root=None):
+def operation(*, url, root_path, runtime, client_instance, request, storage_root=None,
+              expected_operation_id=None):
     """Lock and begin/resume one exact confirmed setup; never store secrets.
 
     ``request`` accepts only the validated setup flags in REQUEST_FIELDS. The
     confirmed flags and digest are persisted, never credential fields. The
     caller must checkpoint allocation responses before
     performing subsequent operations, and call complete only at successful end.
+    An interactive resume must supply the inspected ``expected_operation_id``:
+    confirmation cannot authorize a fresh operation if the old one changed or
+    completed while the prompt was open.
     """
     request = _validated_request(request)
     fingerprint = _digest(request)
@@ -440,9 +444,18 @@ def operation(*, url, root_path, runtime, client_instance, request, storage_root
             record = _read(path)
             if record is not None:
                 _validate(record, scope)
+            if expected_operation_id is not None and (
+                    not isinstance(expected_operation_id, str) or
+                    not re.fullmatch(r"[a-f0-9]{32}", expected_operation_id) or
+                    record is None or record["operation_id"] != expected_operation_id or
+                    record["state"] == "completed"):
+                raise SetupProgressError(
+                    "setup_resume_changed: the inspected setup changed or completed "
+                    "before confirmation; no new setup was started")
             resumed = bool(record and record["state"] != "completed")
             if resumed and record["request_sha256"] != fingerprint:
-                if record["state"] == "started" and not record.get("in_flight"):
+                if expected_operation_id is None and record["state"] == "started" \
+                        and not record.get("in_flight"):
                     # No hosted allocation has begun: a corrected invalid flag
                     # is a fresh operation, not a partial-setup takeover.
                     resumed = False

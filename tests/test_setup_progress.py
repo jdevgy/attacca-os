@@ -413,6 +413,50 @@ class SetupProgressTests(unittest.TestCase):
             with self.operation(request={"actor_type": "service"}):
                 self.fail("CLI-incompatible actor type accepted")
 
+    def test_expected_resume_rejects_completed_operation_without_starting_another(self):
+        with self.operation() as original:
+            original.project_created("example")
+            expected = original.record["operation_id"]
+            original.complete()
+            path = original.path
+        before = path.read_bytes()
+        with self.assertRaisesRegex(progress.SetupProgressError, "setup_resume_changed"):
+            with self.operation(expected_operation_id=expected):
+                self.fail("confirmation started another operation")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_expected_resume_rejects_missing_or_replaced_record(self):
+        expected = "a" * 32
+        with self.assertRaisesRegex(progress.SetupProgressError, "setup_resume_changed"):
+            with self.operation(expected_operation_id=expected):
+                self.fail("missing original operation was created")
+        self.assertEqual(list(self.storage.glob("*.json")), [])
+        with self.operation() as replacement:
+            replacement.project_created("example")
+            path = replacement.path
+        before = path.read_bytes()
+        with self.assertRaisesRegex(progress.SetupProgressError, "setup_resume_changed"):
+            with self.operation(expected_operation_id=expected):
+                self.fail("replacement operation was adopted")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_expected_resume_preserves_exact_unfinished_operation(self):
+        with self.operation() as original:
+            original.project_created("example")
+            original.identity_registered("example.director.codex.gibbs")
+            expected = original.record["operation_id"]
+        with self.operation(expected_operation_id=expected) as resumed:
+            self.assertTrue(resumed.resumed)
+            self.assertEqual(resumed.actor_id, "example.director.codex.gibbs")
+            self.assertEqual(resumed.record["operation_id"], expected)
+
+    def test_expected_resume_cannot_change_even_unallocated_confirmed_request(self):
+        with self.operation() as original:
+            expected = original.record["operation_id"]
+        with self.assertRaisesRegex(progress.SetupProgressError, "setup_request_conflict"):
+            with self.operation(expected_operation_id=expected, request={"create_project": "Other"}):
+                self.fail("confirmation silently changed original choices")
+
 
 if __name__ == "__main__":
     unittest.main()

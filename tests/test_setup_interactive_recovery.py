@@ -95,6 +95,53 @@ class InteractiveSetupRecoveryTests(unittest.TestCase):
     def test_actual_http403_identity_rejection_clears_inflight_for_retry(self):
         self._check_definitive_rejection_retry("/v1/projects/partial-example/agents", 403)
 
+    def test_other_session_completing_during_resume_prompt_cannot_allocate_again(self):
+        import setup_progress
+        fixture = self.fixture
+        argv = ["--db", str(fixture.root / "client.sqlite"), "--actor", "codex",
+                "--actor-type", "agent", "setup", "--url", fixture.url,
+                "--interactive", "--skip-tools", "all", "--no-server"]
+
+        def initial_answer(prompt):
+            if "create the first workspace" in prompt:
+                return "checkout"
+            return "all" if "tools to SKIP" in prompt else ""
+
+        with fixture.direct_cli_context() as core, \
+                mock.patch("builtins.input", side_effect=initial_answer), \
+                mock.patch.object(core, "_finish_remote_checkout", side_effect=core.AttaccaError(
+                    "injected local publication failure")):
+            with self.assertRaisesRegex(core.AttaccaError, "setup_partial_progress"):
+                core.cli_main(argv)
+        actors = fixture.rows("SELECT agent_id FROM agents")
+        self.assertEqual(len(actors), 1)
+        path = next((fixture.home / ".attacca" / "setup-progress").glob("*.json"))
+        original = json.loads(path.read_text())
+        completed_while_prompting = []
+
+        def race_answer(prompt):
+            if "resume interrupted setup" in prompt:
+                scope = original["scope"]
+                # The inspected lock has been released for human input. A
+                # second owner of that same exact operation can now finish.
+                with setup_progress.operation(
+                        url=scope["server_url"], root_path=scope["root_path"],
+                        runtime=scope["runtime"], client_instance=scope["client_instance"],
+                        request=original["request"], storage_root=path.parent) as concurrent:
+                    concurrent.complete()
+                completed_while_prompting.append(True)
+            return ""
+
+        with fixture.direct_cli_context() as core, mock.patch("builtins.input", side_effect=race_answer):
+            with self.assertRaisesRegex(core.AttaccaError, "setup_resume_changed"):
+                core.cli_main(argv)
+        self.assertEqual(completed_while_prompting, [True])
+        self.assertEqual(fixture.rows("SELECT agent_id FROM agents"), actors)
+        self.assertEqual(len(fixture.rows("SELECT project_id FROM projects")), 1)
+        unchanged = json.loads(path.read_text())
+        self.assertEqual(unchanged["operation_id"], original["operation_id"])
+        self.assertEqual(unchanged["state"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

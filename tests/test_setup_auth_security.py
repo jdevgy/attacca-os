@@ -254,6 +254,40 @@ class SetupAuthBoundaryTests(unittest.TestCase):
                     c.provision_setup_agent_token(self.url, "beta", "beta.director.codex")
             self.assertEqual(self.durable_counts(), before)
 
+    def test_active_environment_key_verifies_older_actor_beyond_first_page(self):
+        self._mode("protected")
+        conn = c.connect(self.db)
+        try:
+            for number in range(65):
+                c.agent_register(
+                    conn, "alpha", "web.member", "human",
+                    agent_id="alpha.worker.codex.fixture%d" % number,
+                    role="worker", runtime="codex", canonical_identity=False,
+                    registration_username="member")
+            conn.execute(
+                "UPDATE agents SET registered_at='2000-01-01T00:00:00Z' "
+                "WHERE project_id='alpha' AND agent_id='alpha.director.codex'")
+        finally:
+            conn.close()
+        status, page = self.request(
+            "/v1/projects/alpha/agents", self.key["token"], "alpha.director.codex")
+        self.assertEqual(status, 200, page)
+        self.assertEqual(len(page["agents"]), 60)
+        self.assertNotIn("alpha.director.codex", [row["agent_id"] for row in page["agents"]])
+        before = self.durable_counts()
+        with mock.patch.dict(os.environ, {c.ENV_API_TOKEN: self.key["token"]}), \
+                mock.patch.object(flow, "authorize_client",
+                                  side_effect=AssertionError("unexpected pairing")):
+            verified = c._ensure_client_setup_auth(self.url, "codex")
+            self.assertTrue(verified["authenticated"])
+            self.assertEqual(verified["credential_source"], "environment")
+            provision = c.provision_setup_agent_token(
+                self.url, "alpha", "alpha.director.codex")
+            self.assertEqual(provision["status"], "ready")
+            self.assertEqual(provision["credential_source"], "active_process")
+            self.assertFalse(provision["credential_saved"])
+        self.assertEqual(self.durable_counts(), before)
+
     def _checkpoint_identity(self, label):
         arguments = {
             "url": self.url, "root_path": self.root / "checkout", "runtime": "codex",
